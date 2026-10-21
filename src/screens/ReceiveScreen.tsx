@@ -1,70 +1,164 @@
 // src/screens/ReceiveScreen.tsx
-import React, { useEffect, useState, useCallback } from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, Alert } from 'react-native';
+// VisionCamera v5. We use <Camera/> + useBarcodeScannerOutput directly (instead of
+// <CodeScanner/>) because <CodeScanner/> THROWS when no camera device exists.
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import {
-  Camera,
-  useCameraDevice,
-  useCameraPermission,
-  useCodeScanner,
-} from 'react-native-vision-camera';
+  View,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  StyleSheet,
+  ActivityIndicator,
+  Alert,
+} from 'react-native';
+import { useIsFocused } from '@react-navigation/native';
+import { Camera, useCameraDevice, useCameraPermission } from 'react-native-vision-camera';
+import { useBarcodeScannerOutput } from 'react-native-vision-camera-barcode-scanner';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/AppNavigator';
 import { SocketClient, SenderQRPayload } from '../services/socket/SocketClient';
+import DeviceInfo from 'react-native-device-info';
+import { isValidIPv4 } from '../services/hotspot/HotspotManager';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Receive'>;
 
+const ORANGE = '#FF6B4A';
+const DARK = '#1A1A1A';
+
+// Fully automatic: the sender is the phone hosting the hotspot, which is always the
+// gateway (x.x.x.1) of the network WE joined. So we derive it from our own Wi-Fi IP.
+// Order: derived gateway -> IP from QR (if any) -> common hotspot defaults.
+async function candidateIps(qrIp: string): Promise<string[]> {
+  const list: string[] = [];
+  try {
+    const own = await DeviceInfo.getIpAddress();
+    if (own && isValidIPv4(own) && own !== '0.0.0.0') {
+      const parts = own.split('.');
+      parts[3] = '1';
+      list.push(parts.join('.'));
+    }
+  } catch (e) {
+    // ignore
+  }
+  if (qrIp && isValidIPv4(qrIp)) list.push(qrIp);
+  list.push('192.168.43.1', '192.168.137.1', '172.20.10.1');
+  return Array.from(new Set(list));
+}
+
 export default function ReceiveScreen({ navigation }: Props) {
   const { hasPermission, requestPermission } = useCameraPermission();
-  const device = useCameraDevice('back');
-  const [scanned, setScanned] = useState(false);
+  const isFocused = useIsFocused();
+  const backDevice = useCameraDevice('back');
+  const frontDevice = useCameraDevice('front');
+  const device = backDevice ?? frontDevice;
+
+  const busy = useRef(false); // scanner fires ~30x/sec, guard with a ref
   const [connecting, setConnecting] = useState(false);
+  const [manualIp, setManualIp] = useState('192.168.43.1');
 
   useEffect(() => {
     if (!hasPermission) requestPermission();
-  }, [hasPermission]);
+  }, [hasPermission, requestPermission]);
 
-  const handleCode = useCallback(
-    async (value: string) => {
-      if (scanned) return;
-      setScanned(true);
+  const connectWith = useCallback(
+    async (payload: SenderQRPayload) => {
+      if (busy.current) return;
+      busy.current = true;
       setConnecting(true);
 
+      const ips = await candidateIps(payload.ip);
+      for (const ip of ips) {
+        try {
+          await SocketClient.connect({ ...payload, ip }, 4000);
+          navigation.replace('ReceiverWaiting', { sessionId: payload.sessionId });
+          return;
+        } catch (err) {
+          console.log('Could not connect to', ip);
+        }
+      }
+
+      Alert.alert(
+        'Connection Failed',
+        `Tried: ${ips.join(', ')}\n\nMake sure this phone is connected to the sender's hotspot ` +
+          `(Wi-Fi settings), and that the sender is still on the QR screen. Then scan again.`
+      );
+      busy.current = false;
+      setConnecting(false);
+    },
+    [navigation]
+  );
+
+  const handleCode = useCallback(
+    (value: string) => {
+      if (busy.current) return;
       try {
         const payload: SenderQRPayload = JSON.parse(value);
         if (payload.version !== 1 || !payload.sessionId) {
-          throw new Error('Invalid QR code');
+          throw new Error('Invalid QR');
         }
-        await SocketClient.connect(payload);
-        navigation.replace('ReceiverWaiting', { sessionId: payload.sessionId });
-      } catch (err) {
-        Alert.alert('Connection Failed', 'Could not connect to sender. Try scanning again.');
-        setScanned(false);
-        setConnecting(false);
+        connectWith(payload);
+      } catch {
+        // not a Hopper QR - ignore and keep scanning
       }
     },
-    [scanned, navigation]
+    [connectWith]
   );
 
-  const codeScanner = useCodeScanner({
-    codeTypes: ['qr'],
-    onCodeScanned: (codes) => {
-      const value = codes[0]?.value;
+  const barcodeOutput = useBarcodeScannerOutput({
+    barcodeFormats: ['qr-code'],
+    onBarcodeScanned(barcodes) {
+      const value = barcodes[0]?.rawValue;
       if (value) handleCode(value);
+    },
+    onError(error) {
+      console.log('Barcode scanner error:', error);
     },
   });
 
-  if (!hasPermission) {
-    return (
-      <View style={styles.center}>
-        <Text style={styles.text}>Camera permission is required to scan the QR code.</Text>
-      </View>
-    );
-  }
+  const connectManually = () => {
+    const ip = manualIp.trim();
+    if (!isValidIPv4(ip)) {
+      Alert.alert('Invalid IP', 'Enter the sender IP, e.g. 192.168.43.1');
+      return;
+    }
+    connectWith({ ssid: '', password: '', ip, port: 5050, sessionId: 'manual', version: 1 });
+  };
 
-  if (!device) {
+  // ---- Fallback: no camera (emulator, or camera not found) ----
+  if (!hasPermission || device == null) {
     return (
       <View style={styles.center}>
-        <Text style={styles.text}>No camera found on this device.</Text>
+        <Text style={styles.title}>
+          {!hasPermission ? 'Camera permission needed' : 'No camera found'}
+        </Text>
+        <Text style={styles.text}>
+          {!hasPermission
+            ? 'Allow camera access to scan the sender\'s QR code.'
+            : 'This device has no usable camera (emulators often have none). Connect manually instead.'}
+        </Text>
+
+        {!hasPermission && (
+          <TouchableOpacity style={styles.button} onPress={requestPermission}>
+            <Text style={styles.buttonText}>Allow Camera</Text>
+          </TouchableOpacity>
+        )}
+
+        <Text style={[styles.text, { marginTop: 28 }]}>Sender IP address</Text>
+        <TextInput
+          style={styles.input}
+          value={manualIp}
+          onChangeText={setManualIp}
+          keyboardType="decimal-pad"
+          placeholder="192.168.43.1"
+          placeholderTextColor="#7a5a50"
+        />
+        <TouchableOpacity style={styles.button} onPress={connectManually} disabled={connecting}>
+          {connecting ? (
+            <ActivityIndicator color="#fff" />
+          ) : (
+            <Text style={styles.buttonText}>Connect Manually</Text>
+          )}
+        </TouchableOpacity>
       </View>
     );
   }
@@ -72,12 +166,12 @@ export default function ReceiveScreen({ navigation }: Props) {
   return (
     <View style={styles.container}>
       <Camera
-        style={StyleSheet.absoluteFillObject}
+        style={StyleSheet.absoluteFill}
         device={device}
-        isActive={!scanned}
-        codeScanner={codeScanner}
+        isActive={isFocused && !connecting}
+        outputs={[barcodeOutput]}
       />
-      <View style={styles.overlay}>
+      <View style={styles.overlay} pointerEvents="none">
         <View style={styles.scanBox} />
         <Text style={styles.hint}>
           {connecting ? 'Connecting to sender...' : "Scan the sender's QR code"}
@@ -90,8 +184,37 @@ export default function ReceiveScreen({ navigation }: Props) {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#000' },
-  center: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24, backgroundColor: '#FF6B4A' },
-  text: { color: '#1A1A1A', fontSize: 16, textAlign: 'center' },
+  center: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+    backgroundColor: ORANGE,
+  },
+  title: { color: DARK, fontSize: 22, fontFamily: 'LuckiestGuy-Regular', marginBottom: 12 },
+  text: { color: DARK, fontSize: 15, textAlign: 'center' },
+  input: {
+    width: '100%',
+    marginTop: 10,
+    backgroundColor: '#FF8F77',
+    borderWidth: 2,
+    borderColor: DARK,
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    fontSize: 16,
+    color: DARK,
+  },
+  button: {
+    marginTop: 18,
+    backgroundColor: DARK,
+    paddingVertical: 14,
+    paddingHorizontal: 32,
+    borderRadius: 30,
+    minWidth: 180,
+    alignItems: 'center',
+  },
+  buttonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   overlay: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   scanBox: { width: 240, height: 240, borderWidth: 3, borderColor: '#fff', borderRadius: 16 },
   hint: { color: '#fff', fontSize: 16, marginTop: 20, textAlign: 'center', paddingHorizontal: 20 },

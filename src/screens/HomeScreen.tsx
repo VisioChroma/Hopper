@@ -1,64 +1,82 @@
 // src/screens/HomeScreen.tsx
-import React, { useState } from 'react';
-import { View, Text, Image, StyleSheet, TouchableOpacity } from 'react-native';
-import Video from 'react-native-video';
+// White background + animated bunny SVG (replaces the looping video, which used a
+// SurfaceView and caused glitches during screen transitions).
+import React, { useRef } from 'react';
+import { View, Text, Image, StyleSheet, TouchableOpacity, Animated } from 'react-native';
+import { WebView } from 'react-native-webview';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/AppNavigator';
+import { BUNNY_SVG } from '../assets/svg/bunnySvg';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Home'>;
 
+// The SVG animates itself (SMIL), the WebView only has to display it.
+const BUNNY_HTML = `<!DOCTYPE html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+    <style>
+      html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #FFFFFF; overflow: hidden; }
+      svg { display: block; width: 100%; height: 100%; }
+    </style>
+  </head>
+  <body>${BUNNY_SVG}</body>
+</html>`;
+
 export default function HomeScreen({ navigation }: Props) {
-  const [videoFailed, setVideoFailed] = useState(false);
+  const fade = useRef(new Animated.Value(0)).current;
+
+  // fade the bunny in once the WebView has loaded (avoids a blank/white pop-in)
+  const onLoaded = () => {
+    Animated.timing(fade, { toValue: 1, duration: 300, useNativeDriver: true }).start();
+  };
 
   return (
     <View style={styles.container}>
-      {!videoFailed && (
-        <Video
-          source={require('../assets/videos/bg.mp4')}
-          style={styles.video}
-          resizeMode="cover"
-          repeat
-          muted
-          paused={false}
-          playInBackground={false}
-          playWhenInactive={false}
-          onError={(e) => {
-            console.log('VIDEO ERROR:', JSON.stringify(e));
-            setVideoFailed(true);
-          }}
+      <Text style={styles.title}>HOPPER</Text>
+
+      <Animated.View style={[styles.bunnyWrap, { opacity: fade }]} pointerEvents="none">
+        <WebView
+          source={{ html: BUNNY_HTML }}
+          originWhitelist={['*']}
+          style={styles.webview}
+          containerStyle={styles.webview}
+          scrollEnabled={false}
+          bounces={false}
+          overScrollMode="never"
+          javaScriptEnabled={false}
+          showsVerticalScrollIndicator={false}
+          showsHorizontalScrollIndicator={false}
+          onLoadEnd={onLoaded}
         />
-      )}
+      </Animated.View>
 
-      <View style={styles.overlay}>
-        <Text style={styles.title}>HOPPER</Text>
+      <View style={styles.buttonRow}>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={() => navigation.navigate('Share')}
+          activeOpacity={0.8}
+        >
+          <Image
+            source={require('../assets/images/sendd.png')}
+            style={styles.icon}
+            resizeMode="contain"
+          />
+          <Text style={styles.buttonText}>Send</Text>
+        </TouchableOpacity>
 
-        <View style={styles.buttonRow}>
-          <TouchableOpacity
-            style={styles.button}
-            onPress={() => navigation.navigate('Share')}
-            activeOpacity={0.8}
-          >
-            <Image
-              source={require('../assets/images/sendd.png')}
-              style={styles.icon}
-              resizeMode="contain"
-            />
-            <Text style={styles.buttonText}>Send</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.button}
-            onPress={() => navigation.navigate('Receive')}
-            activeOpacity={0.8}
-          >
-            <Image
-              source={require('../assets/images/receive.png')}
-              style={styles.icon}
-              resizeMode="contain"
-            />
-            <Text style={styles.buttonText}>Receive</Text>
-          </TouchableOpacity>
-        </View>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={() => navigation.navigate('Receive')}
+          activeOpacity={0.8}
+        >
+          <Image
+            source={require('../assets/images/receive.png')}
+            style={styles.icon}
+            resizeMode="contain"
+          />
+          <Text style={styles.buttonText}>Receive</Text>
+        </TouchableOpacity>
       </View>
     </View>
   );
@@ -67,26 +85,24 @@ export default function HomeScreen({ navigation }: Props) {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#FB573F',
-  },
-  video: {
-    position: 'absolute',
-    top: 40,
-    left: 5,
-    width: '100%',
-    height: '80%',
-  },
-  overlay: {
-    flex: 1,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
     justifyContent: 'space-between',
     paddingTop: 50,
     paddingBottom: 40,
-    alignItems: 'center',
   },
   title: {
     fontSize: 28,
     color: '#1A1A1A',
     fontFamily: 'LuckiestGuy-Regular',
+  },
+  bunnyWrap: {
+    width: '100%',
+    aspectRatio: 1,
+  },
+  webview: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
   },
   buttonRow: {
     flexDirection: 'row',
