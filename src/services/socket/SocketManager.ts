@@ -61,7 +61,7 @@ class SocketManagerClass {
     return this.sessionId;
   }
 
-  // Messages are newline-terminated JSON; TCP may split or merge them.
+  // Receivers only send small JSON control lines (newline-terminated); TCP may split or merge them.
   private handleIncoming(deviceId: string, rawData: any) {
     let buf = (this.buffers.get(deviceId) ?? '') + rawData.toString();
     let idx: number;
@@ -72,7 +72,7 @@ class SocketManagerClass {
       try {
         this.handleMessage(deviceId, JSON.parse(line));
       } catch (e) {
-        // non-JSON = raw file chunk, handled by TransferEngine later
+        console.log('Bad message from device', deviceId);
       }
     }
     this.buffers.set(deviceId, buf);
@@ -89,7 +89,7 @@ class SocketManagerClass {
     this.messageListeners.forEach((l) => l(message, deviceId));
   }
 
-  // Listen for control messages from receivers (e.g. RELEASE_DETECTED).
+  // Listen for control messages from receivers (RELEASE_DETECTED, TRANSFER_RECEIVED, ...).
   onMessage(listener: MessageListener) {
     this.messageListeners.push(listener);
     return () => {
@@ -100,8 +100,41 @@ class SocketManagerClass {
   broadcastControl(type: string, payload: object = {}) {
     const message = JSON.stringify({ type, ...payload }) + '\n';
     this.devices.forEach((device) => {
-      device.socket.write(message);
+      try {
+        device.socket.write(message);
+      } catch (e) {
+        console.log('Could not write to', device.deviceName);
+      }
     });
+  }
+
+  // ---- used by TransferEngine ----
+
+  sendControl(deviceId: string, type: string, payload: object = {}) {
+    const device = this.devices.get(deviceId);
+    if (!device) throw new Error('Device disconnected');
+    device.socket.write(JSON.stringify({ type, ...payload }) + '\n');
+  }
+
+  // Resolves when the bytes have been handed to the OS (gives natural back-pressure).
+  writeRaw(deviceId: string, data: Uint8Array): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const device = this.devices.get(deviceId);
+      if (!device) return reject(new Error('Device disconnected'));
+      try {
+        device.socket.write(data, undefined, (err?: Error) => (err ? reject(err) : resolve()));
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
+  setDeviceStatus(deviceId: string, status: ConnectedDevice['status']) {
+    const device = this.devices.get(deviceId);
+    if (device) {
+      device.status = status;
+      this.notifyListeners();
+    }
   }
 
   getDevices(): ConnectedDevice[] {
