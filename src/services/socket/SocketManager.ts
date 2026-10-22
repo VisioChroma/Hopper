@@ -11,11 +11,14 @@ export type ConnectedDevice = {
 };
 
 type DeviceListener = (devices: ConnectedDevice[]) => void;
+type MessageListener = (msg: any, deviceId: string) => void;
 
 class SocketManagerClass {
   private server: any = null;
   private devices: Map<string, ConnectedDevice> = new Map();
   private listeners: DeviceListener[] = [];
+  private messageListeners: MessageListener[] = [];
+  private buffers: Map<string, string> = new Map(); // per-device partial line
   public sessionId: string = '';
   public port = 5050;
 
@@ -40,6 +43,7 @@ class SocketManagerClass {
 
       socket.on('close', () => {
         this.devices.delete(deviceId);
+        this.buffers.delete(deviceId);
         this.notifyListeners();
       });
 
@@ -57,20 +61,40 @@ class SocketManagerClass {
     return this.sessionId;
   }
 
+  // Messages are newline-terminated JSON; TCP may split or merge them.
   private handleIncoming(deviceId: string, rawData: any) {
-    try {
-      const message = JSON.parse(rawData.toString());
-      if (message.type === 'HANDSHAKE' && message.deviceName) {
-        const device = this.devices.get(deviceId);
-        if (device) {
-          device.deviceName = message.deviceName;
-          this.notifyListeners();
-        }
+    let buf = (this.buffers.get(deviceId) ?? '') + rawData.toString();
+    let idx: number;
+    while ((idx = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line) continue;
+      try {
+        this.handleMessage(deviceId, JSON.parse(line));
+      } catch (e) {
+        // non-JSON = raw file chunk, handled by TransferEngine later
       }
-      // RELEASE_DETECTED and other control messages handled here in Sprint C
-    } catch (e) {
-      // non-JSON = raw file chunk, handled by TransferEngine later
     }
+    this.buffers.set(deviceId, buf);
+  }
+
+  private handleMessage(deviceId: string, message: any) {
+    if (message.type === 'HANDSHAKE' && message.deviceName) {
+      const device = this.devices.get(deviceId);
+      if (device) {
+        device.deviceName = message.deviceName;
+        this.notifyListeners();
+      }
+    }
+    this.messageListeners.forEach((l) => l(message, deviceId));
+  }
+
+  // Listen for control messages from receivers (e.g. RELEASE_DETECTED).
+  onMessage(listener: MessageListener) {
+    this.messageListeners.push(listener);
+    return () => {
+      this.messageListeners = this.messageListeners.filter((l) => l !== listener);
+    };
   }
 
   broadcastControl(type: string, payload: object = {}) {
@@ -99,6 +123,7 @@ class SocketManagerClass {
   stopServer() {
     this.devices.forEach((d) => d.socket.destroy());
     this.devices.clear();
+    this.buffers.clear();
     this.server?.close();
     this.server = null;
   }

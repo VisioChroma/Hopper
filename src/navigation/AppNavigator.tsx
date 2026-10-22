@@ -1,6 +1,5 @@
 // src/navigation/AppNavigator.tsx
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import SplashScreen from '../screens/SplashScreen';
@@ -9,6 +8,7 @@ import ShareScreen from '../screens/ShareScreen';
 import ReceiveScreen from '../screens/ReceiveScreen';
 import SenderWaitingScreen from '../screens/SenderWaitingScreen';
 import ReceiverWaitingScreen from '../screens/ReceiverWaitingScreen';
+import FilePickerScreen from '../screens/FilePickerScreen';
 
 export type RootStackParamList = {
   Splash: undefined;
@@ -24,16 +24,6 @@ export type RootStackParamList = {
     sessionId: string; 
   };
 };
-
-// Temporary placeholder screen for FilePicker
-function FilePickerScreen() {
-  return (
-    <View style={styles.placeholderContainer}>
-      <Text style={styles.placeholderTitle}>File Picker</Text>
-      <Text style={styles.placeholderSubtitle}>Coming Soon</Text>
-    </View>
-  );
-}
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
@@ -55,22 +45,3 @@ export default function AppNavigator() {
     </NavigationContainer>
   );
 }
-
-const styles = StyleSheet.create({
-  placeholderContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#121212',
-  },
-  placeholderTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#FFFFFF',
-    marginBottom: 8,
-  },
-  placeholderSubtitle: {
-    fontSize: 14,
-    color: '#888888',
-  },
-});
