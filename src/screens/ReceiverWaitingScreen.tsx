@@ -7,6 +7,10 @@ import type { RootStackParamList } from '../navigation/AppNavigator';
 import { SocketClient } from '../services/socket/SocketClient';
 import { ReceiveEngine, ReceiveState, ReceivedFile } from '../services/transfer/ReceiveEngine';
 import { formatSize } from '../services/files/FileStore';
+import { useHandGesture, LABEL_TEXT } from '../hooks/useHandGesture';
+
+// Show camera speed (fps / ms per frame) next to the hand status. Handy for comparing phones.
+const SHOW_HAND_STATS = true;
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ReceiverWaiting'>;
 
@@ -41,12 +45,19 @@ export default function ReceiverWaitingScreen({}: Props) {
     };
   }, []);
 
-  // Temporary: the catch gesture will replace this button (same message, nothing else changes).
+  // Release: closed fist -> open hand in front of the front camera (or the button as a fallback).
   const catchFiles = () => {
     SocketClient.send({ type: 'RELEASE_DETECTED' });
-    setStatus('Caught! Waiting for the transfer...');
+    setStatus('Released! Receiving files...');
     setGrabbed(false);
   };
+
+  // The camera only runs after the sender grabbed and while nothing is being received.
+  const { status: handStatus, label: handLabel, errorText, stats } = useHandGesture({
+    kind: 'release',
+    enabled: grabbed && rx.phase === 'idle',
+    onGesture: catchFiles,
+  });
 
   const saveCopy = async (f: ReceivedFile) => {
     try {
@@ -73,9 +84,26 @@ export default function ReceiverWaitingScreen({}: Props) {
         <>
           <Text style={styles.status}>{status}</Text>
           {grabbed && (
-            <TouchableOpacity style={styles.button} onPress={catchFiles} activeOpacity={0.8}>
-              <Text style={styles.buttonText}>Catch</Text>
-            </TouchableOpacity>
+            <>
+              <Text style={styles.gestureHint}>
+                {handStatus === 'denied'
+                  ? 'Camera permission needed — allow it in Settings or tap Release'
+                  : handStatus === 'unavailable'
+                    ? `Hand recognition unavailable${errorText ? `: ${errorText}` : ''} — tap Release`
+                    : handStatus === 'starting'
+                      ? 'Starting camera...'
+                      : 'Show your fist ✊ to the front camera, then open your hand ✋ to release'}
+              </Text>
+              {handStatus === 'ready' ? (
+                <Text style={styles.gestureDebug}>
+                  Seeing: {LABEL_TEXT[handLabel]}
+                  {SHOW_HAND_STATS && stats ? `  ·  ${stats}` : ''}
+                </Text>
+              ) : null}
+              <TouchableOpacity style={styles.button} onPress={catchFiles} activeOpacity={0.8}>
+                <Text style={styles.buttonText}>Release</Text>
+              </TouchableOpacity>
+            </>
           )}
         </>
       )}
@@ -141,6 +169,8 @@ const styles = StyleSheet.create({
   container: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#FF6B4A', padding: 24 },
   title: { fontSize: 24, fontFamily: 'LuckiestGuy-Regular', color: DARK },
   status: { fontSize: 16, color: DARK, marginTop: 16, textAlign: 'center' },
+  gestureHint: { fontSize: 14, color: DARK, marginTop: 12, textAlign: 'center', opacity: 0.8 },
+  gestureDebug: { fontSize: 13, fontWeight: '600', color: DARK, marginTop: 8, textAlign: 'center' },
   button: { marginTop: 24, backgroundColor: DARK, paddingVertical: 16, paddingHorizontal: 48, borderRadius: 30, alignItems: 'center' },
   buttonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   card: { width: '100%', marginTop: 24, backgroundColor: DARK, borderRadius: 16, padding: 16, alignItems: 'center' },

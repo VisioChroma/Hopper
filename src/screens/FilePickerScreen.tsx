@@ -1,7 +1,7 @@
 // src/screens/FilePickerScreen.tsx
 // Sender: pick files -> Grab -> (receiver catches) -> files are streamed to that receiver.
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, FlatList, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
 import { errorCodes, isErrorWithCode, keepLocalCopy, pick, types } from '@react-native-documents/picker';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/AppNavigator';
@@ -9,6 +9,21 @@ import { SocketManager } from '../services/socket/SocketManager';
 import { FileStore, PickedFile, formatSize } from '../services/files/FileStore';
 import { sendFiles, SendProgress } from '../services/transfer/TransferEngine';
 import GrabSheet from '../components/GrabSheet';
+import * as RNFS from '@dr.pogodin/react-native-fs';
+import { useHandGesture, LABEL_TEXT } from '../hooks/useHandGesture';
+
+// Show camera speed (fps / ms per frame) next to the hand status. Handy for comparing phones.
+const SHOW_HAND_STATS = true;
+
+// Local path of a picked file (the picker copies files into app storage as file:// uris).
+const toLocalPath = (uri: string) => {
+  const raw = uri.startsWith('file://') ? uri.slice(7) : uri;
+  try {
+    return decodeURIComponent(raw);
+  } catch (e) {
+    return raw;
+  }
+};
 
 type Props = NativeStackScreenProps<RootStackParamList, 'FilePicker'>;
 
@@ -48,15 +63,27 @@ export default function FilePickerScreen({}: Props) {
   const [grabbing, setGrabbing] = useState(false);
   const [preparing, setPreparing] = useState(false);
   const [transfers, setTransfers] = useState<Record<string, SendProgress>>({});
+  const [gestureOn, setGestureOn] = useState(true);
+  // Receivers that were told GRABBED and have not released yet (multi-device).
+  const [pending, setPending] = useState<{ id: string; name: string }[]>([]);
   const active = useRef<Set<string>>(new Set());
 
   useEffect(() => FileStore.subscribe(setFiles), []);
+
+  // A receiver that disconnects can no longer release.
+  useEffect(() => {
+    return SocketManager.onDevicesChanged((devs) => {
+      const alive = new Set(devs.map((d) => d.deviceId));
+      setPending((p) => (p.every((x) => alive.has(x.id)) ? p : p.filter((x) => alive.has(x.id))));
+    });
+  }, []);
 
   // A receiver caught the files -> close the sheet and stream the files to THAT receiver.
   useEffect(() => {
     return SocketManager.onMessage((msg, deviceId) => {
       if (msg.type !== 'RELEASE_DETECTED') return;
       setGrabbing(false);
+      setPending((p) => p.filter((x) => x.id !== deviceId));
       if (active.current.has(deviceId)) return; // already sending to this device
 
       const snapshot = [...FileStore.get()]; // later edits to the list don't affect this send
@@ -115,18 +142,53 @@ export default function FilePickerScreen({}: Props) {
     }
   };
 
-  const grab = () => {
-    setTransfers({}); // clear results of the previous round
-    SocketManager.broadcastControl('GRABBED', {
-      files: files.map((f) => ({ name: f.name, size: f.size, type: f.type })),
-    });
-    setGrabbing(true);
+  // Grab: check that every selected file can be read, tell the receivers, show the grab animation.
+  // The bytes are sent later, when a receiver answers with RELEASE_DETECTED.
+  const grabLock = useRef(false);
+  const grab = async () => {
+    if (grabLock.current) return;
+    grabLock.current = true;
+    try {
+      const ready: { name: string; size: number | null; type: string | null }[] = [];
+      for (const f of files) {
+        try {
+          const st = await RNFS.stat(toLocalPath(f.uri));
+          ready.push({ name: f.name, size: Number(st.size), type: f.type });
+        } catch (e) {
+          Alert.alert('Cannot read file', `"${f.name}" is no longer available. Remove it and pick it again.`);
+          return;
+        }
+      }
+      setTransfers({}); // clear results of the previous round
+      SocketManager.broadcastControl('GRABBED', { files: ready });
+      setPending(SocketManager.getDevices().map((d) => ({ id: d.deviceId, name: d.deviceName })));
+      setGrabbing(true);
+    } finally {
+      grabLock.current = false;
+    }
   };
 
+  // Stop waiting: tell the receivers that have not released yet that the grab is over.
   const cancelGrab = () => {
-    SocketManager.broadcastControl('GRAB_CANCELLED');
+    pending.forEach((p) => {
+      try {
+        SocketManager.sendControl(p.id, 'GRAB_CANCELLED');
+      } catch (e) {
+        // receiver already gone
+      }
+    });
+    setPending([]);
     setGrabbing(false);
   };
+
+  // Open hand -> closed fist in front of the front camera = grab.
+  // The camera only runs while there is something to grab and nothing is in progress.
+  const canGrab = files.length > 0 && !grabbing && !busy && !preparing;
+  const { status: handStatus, label: handLabel, errorText, stats } = useHandGesture({
+    kind: 'grab',
+    enabled: gestureOn && canGrab,
+    onGesture: grab,
+  });
 
   const transferList = Object.values(transfers);
 
@@ -169,6 +231,46 @@ export default function FilePickerScreen({}: Props) {
           ))}
         </View>
       )}
+
+      {pending.length > 0 && !grabbing && (
+        <View style={styles.pendingRow}>
+          <View style={styles.gestureText}>
+            <Text style={styles.gestureTitle}>Still waiting for release</Text>
+            <Text style={styles.gestureHint} numberOfLines={2}>
+              {pending.map((p) => p.name).join(', ')}
+            </Text>
+          </View>
+          <TouchableOpacity onPress={cancelGrab} hitSlop={8}>
+            <Text style={styles.pendingStop}>Stop</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      <View style={styles.gestureRow}>
+        <View style={styles.gestureText}>
+          <Text style={styles.gestureTitle}>Hand grab</Text>
+          <Text style={styles.gestureHint}>
+            {!gestureOn
+              ? 'Off — use the button'
+              : !canGrab
+                ? 'Select files to enable'
+                : handStatus === 'denied'
+                  ? 'Camera permission needed — allow it in Settings or use the button'
+                  : handStatus === 'unavailable'
+                    ? `Hand recognition unavailable${errorText ? `: ${errorText}` : ''} — use the button`
+                    : handStatus === 'starting'
+                      ? 'Starting camera...'
+                      : 'Show your open hand ✋ to the front camera, then close it into a fist ✊'}
+          </Text>
+          {gestureOn && canGrab && handStatus === 'ready' ? (
+            <Text style={styles.gestureDebug}>
+              Seeing: {LABEL_TEXT[handLabel]}
+              {SHOW_HAND_STATS && stats ? `  ·  ${stats}` : ''}
+            </Text>
+          ) : null}
+        </View>
+        <Switch value={gestureOn} onValueChange={setGestureOn} trackColor={{ true: ORANGE, false: '#CCC' }} />
+      </View>
 
       <TouchableOpacity
         style={[styles.button, (files.length === 0 || busy || preparing) && styles.buttonDisabled]}
@@ -226,6 +328,29 @@ const styles = StyleSheet.create({
   transferError: { color: '#ff9b8a' },
   barTrack: { height: 6, backgroundColor: '#444', borderRadius: 3, marginTop: 8, overflow: 'hidden' },
   barFill: { height: 6, backgroundColor: ORANGE, borderRadius: 3 },
+  gestureRow: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F3F3F3',
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 8,
+  },
+  pendingRow: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFE9E3',
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 8,
+  },
+  pendingStop: { color: ORANGE, fontSize: 14, fontWeight: '700' },
+  gestureText: { flex: 1, marginRight: 12 },
+  gestureTitle: { color: DARK, fontSize: 14, fontWeight: '700' },
+  gestureHint: { color: '#666', fontSize: 12, marginTop: 2 },
+  gestureDebug: { color: ORANGE, fontSize: 12, fontWeight: '600', marginTop: 4 },
   button: {
     marginTop: 12,
     marginBottom: 30,
