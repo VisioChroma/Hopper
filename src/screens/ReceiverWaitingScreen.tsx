@@ -1,5 +1,5 @@
 // src/screens/ReceiverWaitingScreen.tsx
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert } from 'react-native';
 import { errorCodes, isErrorWithCode, saveDocuments } from '@react-native-documents/picker';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -7,10 +7,9 @@ import type { RootStackParamList } from '../navigation/AppNavigator';
 import { SocketClient } from '../services/socket/SocketClient';
 import { ReceiveEngine, ReceiveState, ReceivedFile } from '../services/transfer/ReceiveEngine';
 import { formatSize } from '../services/files/FileStore';
-import { useHandGesture, LABEL_TEXT } from '../hooks/useHandGesture';
-
-// Show camera speed (fps / ms per frame) next to the hand status. Handy for comparing phones.
-const SHOW_HAND_STATS = true;
+import { useHandGesture } from '../hooks/useHandGesture';
+import EdgeGlow from '../components/glow/EdgeGlow';
+import HandHint from '../components/HandHint';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'ReceiverWaiting'>;
 
@@ -22,6 +21,8 @@ const toFileUri = (path: string) => 'file://' + path.split('/').map(encodeURICom
 export default function ReceiverWaitingScreen({}: Props) {
   const [status, setStatus] = useState('Connected — waiting for sender...');
   const [grabbed, setGrabbed] = useState(false);
+  // true from the moment the sender grabs until the transfer is over: drives the glow
+  const [session, setSession] = useState(false);
   const [rx, setRx] = useState<ReceiveState>(ReceiveEngine.getState());
 
   useEffect(() => {
@@ -31,12 +32,13 @@ export default function ReceiverWaitingScreen({}: Props) {
 
     const offMsg = SocketClient.onMessage((msg) => {
       if (msg.type === 'GRABBED') {
-        const n = Array.isArray(msg.files) ? msg.files.length : 0;
-        setStatus(`Sender grabbed ${n} ${n === 1 ? 'file' : 'files'} — get ready to catch!`);
+        ReceiveEngine.reset(); // dismiss a finished result card (no-op while receiving)
         setGrabbed(true);
+        setSession(true);
       } else if (msg.type === 'GRAB_CANCELLED') {
         setStatus('Connected — waiting for sender...');
         setGrabbed(false);
+        setSession(false);
       }
     });
     return () => {
@@ -48,16 +50,32 @@ export default function ReceiverWaitingScreen({}: Props) {
   // Release: closed fist -> open hand in front of the front camera (or the button as a fallback).
   const catchFiles = () => {
     SocketClient.send({ type: 'RELEASE_DETECTED' });
-    setStatus('Released! Receiving files...');
-    setGrabbed(false);
+    setGrabbed(false); // the glow stays on (session) until the transfer is over
   };
 
   // The camera only runs after the sender grabbed and while nothing is being received.
-  const { status: handStatus, label: handLabel, errorText, stats } = useHandGesture({
+  const { status: handStatus, label: handLabel, errorText } = useHandGesture({
     kind: 'release',
     enabled: grabbed && rx.phase === 'idle',
     onGesture: catchFiles,
   });
+
+  // Transfer finished or failed -> glow off.
+  useEffect(() => {
+    if (rx.phase === 'done' || rx.phase === 'error') setSession(false);
+  }, [rx.phase]);
+
+  // No on-screen hint text any more: only tell the user if the camera cannot be used (once).
+  const warned = useRef(false);
+  useEffect(() => {
+    if ((handStatus === 'denied' || handStatus === 'unavailable') && !warned.current) {
+      warned.current = true;
+      Alert.alert(
+        'Hand gestures unavailable',
+        `${handStatus === 'denied' ? 'Camera permission is needed.' : errorText || 'The camera could not start.'}\n\nYou can still use the button.`,
+      );
+    }
+  }, [handStatus, errorText]);
 
   const saveCopy = async (f: ReceivedFile) => {
     try {
@@ -82,24 +100,10 @@ export default function ReceiverWaitingScreen({}: Props) {
 
       {rx.phase === 'idle' && (
         <>
-          <Text style={styles.status}>{status}</Text>
+          {!grabbed && !session && status ? <Text style={styles.status}>{status}</Text> : null}
           {grabbed && (
             <>
-              <Text style={styles.gestureHint}>
-                {handStatus === 'denied'
-                  ? 'Camera permission needed — allow it in Settings or tap Release'
-                  : handStatus === 'unavailable'
-                    ? `Hand recognition unavailable${errorText ? `: ${errorText}` : ''} — tap Release`
-                    : handStatus === 'starting'
-                      ? 'Starting camera...'
-                      : 'Show your fist ✊ to the front camera, then open your hand ✋ to release'}
-              </Text>
-              {handStatus === 'ready' ? (
-                <Text style={styles.gestureDebug}>
-                  Seeing: {LABEL_TEXT[handLabel]}
-                  {SHOW_HAND_STATS && stats ? `  ·  ${stats}` : ''}
-                </Text>
-              ) : null}
+              <HandHint kind="release" status={handStatus} label={handLabel} />
               <TouchableOpacity style={styles.button} onPress={catchFiles} activeOpacity={0.8}>
                 <Text style={styles.buttonText}>Release</Text>
               </TouchableOpacity>
@@ -161,6 +165,8 @@ export default function ReceiverWaitingScreen({}: Props) {
           </TouchableOpacity>
         </View>
       )}
+      
+      <EdgeGlow active={session && rx.phase !== 'done' && rx.phase !== 'error'} />
     </View>
   );
 }

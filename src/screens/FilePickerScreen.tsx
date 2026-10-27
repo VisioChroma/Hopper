@@ -1,19 +1,17 @@
 // src/screens/FilePickerScreen.tsx
 // Sender: pick files -> Grab -> (receiver catches) -> files are streamed to that receiver.
 import React, { useEffect, useRef, useState } from 'react';
-import { Alert, FlatList, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
+import { Alert, FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { errorCodes, isErrorWithCode, keepLocalCopy, pick, types } from '@react-native-documents/picker';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/AppNavigator';
 import { SocketManager } from '../services/socket/SocketManager';
 import { FileStore, PickedFile, formatSize } from '../services/files/FileStore';
 import { sendFiles, SendProgress } from '../services/transfer/TransferEngine';
-import GrabSheet from '../components/GrabSheet';
+import EdgeGlow from '../components/glow/EdgeGlow';
 import * as RNFS from '@dr.pogodin/react-native-fs';
-import { useHandGesture, LABEL_TEXT } from '../hooks/useHandGesture';
-
-// Show camera speed (fps / ms per frame) next to the hand status. Handy for comparing phones.
-const SHOW_HAND_STATS = true;
+import { useHandGesture } from '../hooks/useHandGesture';
+import HandHint from '../components/HandHint';
 
 // Local path of a picked file (the picker copies files into app storage as file:// uris).
 const toLocalPath = (uri: string) => {
@@ -63,7 +61,8 @@ export default function FilePickerScreen({}: Props) {
   const [grabbing, setGrabbing] = useState(false);
   const [preparing, setPreparing] = useState(false);
   const [transfers, setTransfers] = useState<Record<string, SendProgress>>({});
-  const [gestureOn, setGestureOn] = useState(true);
+  // true from the moment of the grab until every transfer has finished (or it was cancelled): drives the glow
+  const [session, setSession] = useState(false);
   // Receivers that were told GRABBED and have not released yet (multi-device).
   const [pending, setPending] = useState<{ id: string; name: string }[]>([]);
   const active = useRef<Set<string>>(new Set());
@@ -75,6 +74,10 @@ export default function FilePickerScreen({}: Props) {
     return SocketManager.onDevicesChanged((devs) => {
       const alive = new Set(devs.map((d) => d.deviceId));
       setPending((p) => (p.every((x) => alive.has(x.id)) ? p : p.filter((x) => alive.has(x.id))));
+      if (alive.size === 0) {
+        setSession(false);
+        setGrabbing(false);
+      }
     });
   }, []);
 
@@ -97,6 +100,15 @@ export default function FilePickerScreen({}: Props) {
   }, []);
 
   const busy = Object.values(transfers).some((t) => t.state === 'sending');
+
+  // The glow stays on from the grab until the last transfer is finished. (It must not switch off in the
+  // short gap between "receiver released" and "first progress update", so it only ends once at least one
+  // transfer exists and none is still sending.)
+  useEffect(() => {
+    if (session && !grabbing && pending.length === 0 && Object.keys(transfers).length > 0 && !busy) {
+      setSession(false);
+    }
+  }, [session, grabbing, pending.length, transfers, busy]);
 
   const choose = async () => {
     try {
@@ -161,6 +173,7 @@ export default function FilePickerScreen({}: Props) {
       }
       setTransfers({}); // clear results of the previous round
       SocketManager.broadcastControl('GRABBED', { files: ready });
+      setSession(true);
       setPending(SocketManager.getDevices().map((d) => ({ id: d.deviceId, name: d.deviceName })));
       setGrabbing(true);
     } finally {
@@ -179,16 +192,29 @@ export default function FilePickerScreen({}: Props) {
     });
     setPending([]);
     setGrabbing(false);
+    setSession(false);
   };
 
   // Open hand -> closed fist in front of the front camera = grab.
   // The camera only runs while there is something to grab and nothing is in progress.
-  const canGrab = files.length > 0 && !grabbing && !busy && !preparing;
-  const { status: handStatus, label: handLabel, errorText, stats } = useHandGesture({
+  const canGrab = files.length > 0 && !grabbing && !busy && !preparing && !session;
+  const { status: handStatus, label: handLabel, errorText } = useHandGesture({
     kind: 'grab',
-    enabled: gestureOn && canGrab,
+    enabled: canGrab,
     onGesture: grab,
   });
+
+  // No on-screen hint text any more: only tell the user if the camera cannot be used (once).
+  const warned = useRef(false);
+  useEffect(() => {
+    if ((handStatus === 'denied' || handStatus === 'unavailable') && !warned.current) {
+      warned.current = true;
+      Alert.alert(
+        'Hand gestures unavailable',
+        `${handStatus === 'denied' ? 'Camera permission is needed.' : errorText || 'The camera could not start.'}\n\nYou can still use the Grab button.`,
+      );
+    }
+  }, [handStatus, errorText]);
 
   const transferList = Object.values(transfers);
 
@@ -232,49 +258,16 @@ export default function FilePickerScreen({}: Props) {
         </View>
       )}
 
-      {pending.length > 0 && !grabbing && (
-        <View style={styles.pendingRow}>
-          <View style={styles.gestureText}>
-            <Text style={styles.gestureTitle}>Still waiting for release</Text>
-            <Text style={styles.gestureHint} numberOfLines={2}>
-              {pending.map((p) => p.name).join(', ')}
-            </Text>
-          </View>
-          <TouchableOpacity onPress={cancelGrab} hitSlop={8}>
-            <Text style={styles.pendingStop}>Stop</Text>
-          </TouchableOpacity>
-        </View>
+      {session && (grabbing || pending.length > 0) && (
+        <TouchableOpacity style={styles.cancelBtn} onPress={cancelGrab} activeOpacity={0.8}>
+          <Text style={styles.cancelText}>Cancel</Text>
+        </TouchableOpacity>
       )}
-
-      <View style={styles.gestureRow}>
-        <View style={styles.gestureText}>
-          <Text style={styles.gestureTitle}>Hand grab</Text>
-          <Text style={styles.gestureHint}>
-            {!gestureOn
-              ? 'Off — use the button'
-              : !canGrab
-                ? 'Select files to enable'
-                : handStatus === 'denied'
-                  ? 'Camera permission needed — allow it in Settings or use the button'
-                  : handStatus === 'unavailable'
-                    ? `Hand recognition unavailable${errorText ? `: ${errorText}` : ''} — use the button`
-                    : handStatus === 'starting'
-                      ? 'Starting camera...'
-                      : 'Show your open hand ✋ to the front camera, then close it into a fist ✊'}
-          </Text>
-          {gestureOn && canGrab && handStatus === 'ready' ? (
-            <Text style={styles.gestureDebug}>
-              Seeing: {LABEL_TEXT[handLabel]}
-              {SHOW_HAND_STATS && stats ? `  ·  ${stats}` : ''}
-            </Text>
-          ) : null}
-        </View>
-        <Switch value={gestureOn} onValueChange={setGestureOn} trackColor={{ true: ORANGE, false: '#CCC' }} />
-      </View>
+      {canGrab && <HandHint kind="grab" status={handStatus} label={handLabel} />}
 
       <TouchableOpacity
         style={[styles.button, (files.length === 0 || busy || preparing) && styles.buttonDisabled]}
-        disabled={files.length === 0 || grabbing || busy || preparing}
+        disabled={files.length === 0 || grabbing || busy || preparing || session}
         onPress={grab}
         activeOpacity={0.8}
       >
@@ -287,7 +280,8 @@ export default function FilePickerScreen({}: Props) {
         </Text>
       </TouchableOpacity>
 
-      <GrabSheet visible={grabbing} fileCount={files.length} onCancel={cancelGrab} />
+      
+      <EdgeGlow active={session} />
     </View>
   );
 }
@@ -362,5 +356,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   buttonDisabled: { backgroundColor: '#B5B5B5' },
+  cancelBtn: { marginTop: 8, paddingVertical: 10, paddingHorizontal: 28, borderRadius: 24, backgroundColor: '#F3F3F3' },
+  cancelText: { color: DARK, fontSize: 14, fontWeight: '600' },
   buttonText: { color: '#fff', fontSize: 16, fontWeight: '600' },
 });
