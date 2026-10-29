@@ -117,6 +117,7 @@ export async function sendFiles(
       const { file, path, size } = prepared[i];
       emit({ fileIndex: i + 1, fileName: file.name }, true);
 
+      SocketManager.setRaw(deviceId, true); // no PONG etc. may be written until the file body is out
       SocketManager.sendControl(deviceId, 'FILE_START', {
         id: `${batchId}-${i + 1}`,
         index: i + 1,
@@ -152,6 +153,7 @@ export async function sendFiles(
         }
       } finally {
         next?.catch(() => {}); // avoid unhandled rejection if we bailed out early
+        SocketManager.setRaw(deviceId, false);
       }
 
       if (pos !== size) throw new Error(`${file.name} changed while sending`);
@@ -167,6 +169,7 @@ export async function sendFiles(
   } catch (e: any) {
     emit({ state: 'error', error: e?.message ?? 'Transfer failed' }, true);
   } finally {
+    SocketManager.setRaw(deviceId, false);
     SocketManager.setDeviceStatus(deviceId, 'connected');
   }
 }

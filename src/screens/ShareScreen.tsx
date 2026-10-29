@@ -18,10 +18,9 @@ export default function ShareScreen({ navigation }: Props) {
       const ip = await detectHotspotIp(); // '' if unknown - receiver auto-detects
       SocketManager.stopServer(); // avoid a second server on the same port
       const sessionId = SocketManager.startServer();
-      navigation.replace('SenderWaiting', {
-        hotspot: { ssid: '', password: '', ip },
-        sessionId,
-      });
+      const hotspot = { ssid: '', password: '', ip };
+      SocketManager.setHotspot(hotspot); // so the QR can be shown again later from the sharing screen
+      navigation.replace('SenderWaiting', { hotspot, sessionId });
     } catch (err) {
       setStarting(false);
       Alert.alert('Could not start', 'Failed to start the sharing server. Try again.');

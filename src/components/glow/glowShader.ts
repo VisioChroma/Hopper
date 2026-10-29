@@ -60,7 +60,9 @@ float snoise3(float3 p) {
 float circle(float2 st, float2 center, float radius) {
   float2 dist = st - center;
   float dd = dot(dist, dist) * 4.0;
-  return smoothstep(radius - radius * 0.5, radius, dd);
+  // radius is 0 on the very first frame of the intro; smoothstep(0, 0, x) is undefined (NaN on some GPUs)
+  float r = max(radius, 0.0001);
+  return smoothstep(r - r * 0.5, r, dd);
 }
 
 float3 getColor(int idx) {
@@ -138,14 +140,16 @@ const hex = (h: string): [number, number, number] => {
   return [(n >> 16) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255];
 };
 
-// Apple Intelligence palette (max 8 colours)
-const COLORS = ['#BC82F3', '#F5B9EA', '#8D9FFF', '#AA6EEE', '#FF6778', '#FFBA71', '#C686FF'].map(hex);
+// Colours of the Siri-style glow (max 8): purple, indigo, blue, cyan, deep red - no pink.
+// They travel slowly around the screen edge.
+export const GLOW_HEX = ['#A64DDB', '#7A4DFF', '#2D8CFF', '#12B5E5', '#7A4DFF', '#C0394F', '#A64DDB'];
+const COLORS = GLOW_HEX.map(hex);
 const pad = (i: number): [number, number, number] => COLORS[i] ?? [0, 0, 0];
 
 // Tweak the look here.
 export const GLOW_PARAMS = {
-  uMargin: 8, // gap between the screen edge and the glow (dp)
-  uExcess: 16, // how far the glow spreads inwards (dp)
+  uMargin: 6, // gap between the screen edge and the glow (dp)
+  uExcess: 26, // how far the glow spreads inwards (dp)
   uRadius: 44, // corner radius of the glow (dp) - match your phone's screen corners
   uWaveSpeed: 10, // how fast the intro bloom spreads from the bottom
   uWaveOrigin: [0.5, 1.0] as [number, number], // where the intro starts: bottom centre

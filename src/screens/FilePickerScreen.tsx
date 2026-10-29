@@ -5,10 +5,11 @@ import { Alert, FlatList, StyleSheet, Text, TouchableOpacity, View } from 'react
 import { errorCodes, isErrorWithCode, keepLocalCopy, pick, types } from '@react-native-documents/picker';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../navigation/AppNavigator';
-import { SocketManager } from '../services/socket/SocketManager';
+import { ConnectedDevice, SocketManager } from '../services/socket/SocketManager';
 import { FileStore, PickedFile, formatSize } from '../services/files/FileStore';
 import { sendFiles, SendProgress } from '../services/transfer/TransferEngine';
-import EdgeGlow from '../components/glow/EdgeGlow';
+import { GlowState } from '../services/session/GlowState';
+import QRModal from '../components/QRModal';
 import * as RNFS from '@dr.pogodin/react-native-fs';
 import { useHandGesture } from '../hooks/useHandGesture';
 import HandHint from '../components/HandHint';
@@ -66,12 +67,21 @@ export default function FilePickerScreen({}: Props) {
   // Receivers that were told GRABBED and have not released yet (multi-device).
   const [pending, setPending] = useState<{ id: string; name: string }[]>([]);
   const active = useRef<Set<string>>(new Set());
+  const [devices, setDevices] = useState<ConnectedDevice[]>(SocketManager.getDevices());
+  const [qrOpen, setQrOpen] = useState(false);
 
   useEffect(() => FileStore.subscribe(setFiles), []);
+
+  // The edge glow is one overlay at the app root (see GlowOverlay); this screen only says when it is on.
+  useEffect(() => {
+    GlowState.set('send', session);
+  }, [session]);
+  useEffect(() => () => GlowState.set('send', false), []);
 
   // A receiver that disconnects can no longer release.
   useEffect(() => {
     return SocketManager.onDevicesChanged((devs) => {
+      setDevices(devs);
       const alive = new Set(devs.map((d) => d.deviceId));
       setPending((p) => (p.every((x) => alive.has(x.id)) ? p : p.filter((x) => alive.has(x.id))));
       if (alive.size === 0) {
@@ -81,9 +91,26 @@ export default function FilePickerScreen({}: Props) {
     });
   }, []);
 
+  // Kept in refs so the message listener below (registered once) always sees the current values.
+  const pendingRef = useRef(pending);
+  pendingRef.current = pending;
+  const grabFiles = useRef<{ name: string; size: number | null; type: string | null }[]>([]);
+
   // A receiver caught the files -> close the sheet and stream the files to THAT receiver.
   useEffect(() => {
     return SocketManager.onMessage((msg, deviceId) => {
+      // A receiver reconnected while a grab was still open (e.g. a Wi-Fi blip): tell it again,
+      // otherwise it would never show the Release prompt.
+      if (msg.type === 'DEVICE_JOINED') {
+        if (pendingRef.current.some((p) => p.id === deviceId)) {
+          try {
+            SocketManager.sendControl(deviceId, 'GRABBED', { files: grabFiles.current });
+          } catch (e) {
+            // gone again
+          }
+        }
+        return;
+      }
       if (msg.type !== 'RELEASE_DETECTED') return;
       setGrabbing(false);
       setPending((p) => p.filter((x) => x.id !== deviceId));
@@ -172,6 +199,7 @@ export default function FilePickerScreen({}: Props) {
         }
       }
       setTransfers({}); // clear results of the previous round
+      grabFiles.current = ready;
       SocketManager.broadcastControl('GRABBED', { files: ready });
       setSession(true);
       setPending(SocketManager.getDevices().map((d) => ({ id: d.deviceId, name: d.deviceName })));
@@ -197,7 +225,8 @@ export default function FilePickerScreen({}: Props) {
 
   // Open hand -> closed fist in front of the front camera = grab.
   // The camera only runs while there is something to grab and nothing is in progress.
-  const canGrab = files.length > 0 && !grabbing && !busy && !preparing && !session;
+  const hasReceiver = devices.length > 0;
+  const canGrab = files.length > 0 && hasReceiver && !grabbing && !busy && !preparing && !session;
   const { status: handStatus, label: handLabel, errorText } = useHandGesture({
     kind: 'grab',
     enabled: canGrab,
@@ -221,6 +250,17 @@ export default function FilePickerScreen({}: Props) {
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Pick Files</Text>
+
+      <View style={styles.connRow}>
+        <Text style={styles.connText} numberOfLines={1}>
+          {hasReceiver
+            ? `📱 ${devices.length} ${devices.length === 1 ? 'receiver' : 'receivers'} connected`
+            : 'No receiver connected'}
+        </Text>
+        <TouchableOpacity style={styles.qrBtn} onPress={() => setQrOpen(true)} activeOpacity={0.8}>
+          <Text style={styles.qrBtnText}>Show QR</Text>
+        </TouchableOpacity>
+      </View>
 
       <TouchableOpacity style={styles.outlineBtn} onPress={choose} activeOpacity={0.8} disabled={busy || preparing}>
         <Text style={styles.outlineText}>
@@ -266,8 +306,8 @@ export default function FilePickerScreen({}: Props) {
       {canGrab && <HandHint kind="grab" status={handStatus} label={handLabel} />}
 
       <TouchableOpacity
-        style={[styles.button, (files.length === 0 || busy || preparing) && styles.buttonDisabled]}
-        disabled={files.length === 0 || grabbing || busy || preparing || session}
+        style={[styles.button, (files.length === 0 || !hasReceiver || busy || preparing) && styles.buttonDisabled]}
+        disabled={files.length === 0 || !hasReceiver || grabbing || busy || preparing || session}
         onPress={grab}
         activeOpacity={0.8}
       >
@@ -276,12 +316,13 @@ export default function FilePickerScreen({}: Props) {
             ? 'Sending...'
             : files.length === 0
               ? 'Select files to grab'
-              : `Grab ${files.length} ${files.length === 1 ? 'file' : 'files'}`}
+              : !hasReceiver
+                ? 'Waiting for a receiver...'
+                : `Grab ${files.length} ${files.length === 1 ? 'file' : 'files'}`}
         </Text>
       </TouchableOpacity>
 
-      
-      <EdgeGlow active={session} />
+      <QRModal visible={qrOpen} onClose={() => setQrOpen(false)} />
     </View>
   );
 }
@@ -289,6 +330,16 @@ export default function FilePickerScreen({}: Props) {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFFFFF', padding: 24, alignItems: 'center' },
   title: { fontSize: 24, fontFamily: 'LuckiestGuy-Regular', color: DARK, marginTop: 40 },
+  connRow: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginTop: 14,
+  },
+  connText: { flex: 1, marginRight: 12, color: DARK, fontSize: 13, fontWeight: '600' },
+  qrBtn: { backgroundColor: DARK, paddingVertical: 8, paddingHorizontal: 18, borderRadius: 20 },
+  qrBtnText: { color: '#fff', fontSize: 13, fontWeight: '600' },
   outlineBtn: {
     width: '100%',
     marginTop: 24,

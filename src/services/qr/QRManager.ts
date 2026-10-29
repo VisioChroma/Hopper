@@ -1,5 +1,4 @@
 // src/services/qr/QRManager.ts
-import { SocketManager } from '../socket/SocketManager';
 import { HotspotConfig } from '../hotspot/HotspotManager';
 
 export function buildQRPayload(hotspot: HotspotConfig, sessionId: string, port: number) {
